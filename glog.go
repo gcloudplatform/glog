@@ -400,8 +400,10 @@ func init() {
 	flag.BoolVar(&logging.alsoToStderr, "alsologtostderr", false, "log to standard error as well as files")
 	flag.Var(&logging.verbosity, "v", "log level for V logs")
 	flag.Var(&logging.stderrThreshold, "stderrthreshold", "logs at or above this threshold go to stderr")
+	flag.BoolVar(&logging.dailyRolling, "daily_rolling", true, " weather to handle log files daily")
 	flag.Var(&logging.vmodule, "vmodule", "comma-separated list of pattern=N settings for file-filtered logging")
 	flag.Var(&logging.traceLocation, "log_backtrace_at", "when logging hits line file:N, emit a stack trace")
+	flag.DurationVar(&flushInterval, "glog_flushinterval", 30*time.Second, "glog flushInterval")
 
 	// Default stderrThreshold is ERROR.
 	logging.stderrThreshold = errorLog
@@ -422,6 +424,8 @@ type loggingT struct {
 	// compatibility. TODO: does this matter enough to fix? Seems unlikely.
 	toStderr     bool // The -logtostderr flag.
 	alsoToStderr bool // The -alsologtostderr flag.
+
+	dailyRolling bool
 
 	// Level flag. Handled atomically.
 	stderrThreshold severity // The -stderrthreshold flag.
@@ -802,9 +806,10 @@ func (l *loggingT) exit(err error) {
 type syncBuffer struct {
 	logger *loggingT
 	*bufio.Writer
-	file   *os.File
-	sev    severity
-	nbytes uint64 // The number of bytes written to this file
+	file        *os.File
+	sev         severity
+	nbytes      uint64 // The number of bytes written to this file
+	createdDate string
 }
 
 func (sb *syncBuffer) Sync() error {
@@ -812,6 +817,14 @@ func (sb *syncBuffer) Sync() error {
 }
 
 func (sb *syncBuffer) Write(p []byte) (n int, err error) {
+	if logging.dailyRolling {
+		if sb.createdDate != string(p[1:5]) {
+			if err := sb.rotateFile(time.Now()); err != nil {
+				sb.logger.exit(err)
+			}
+		}
+	}
+
 	if sb.nbytes+uint64(len(p)) >= MaxSize {
 		if err := sb.rotateFile(time.Now()); err != nil {
 			sb.logger.exit(err)
@@ -839,7 +852,8 @@ func (sb *syncBuffer) rotateFile(now time.Time) error {
 	}
 
 	sb.Writer = bufio.NewWriterSize(sb.file, bufferSize)
-
+	_, month, day := now.Date()
+	sb.createdDate = fmt.Sprintf("%02d%02d", month, day)
 	// Write header.
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "Log file created at: %s\n", now.Format("2006/01/02 15:04:05"))
@@ -875,7 +889,7 @@ func (l *loggingT) createFiles(sev severity) error {
 	return nil
 }
 
-const flushInterval = 30 * time.Second
+var flushInterval = 30 * time.Second
 
 // flushDaemon periodically flushes the log file buffers.
 func (l *loggingT) flushDaemon() {
